@@ -1,0 +1,293 @@
+---
+title: "gene-plot-Pi-shiny-beta"
+author: "Hubert Kicinski"
+date: "2024-10-09"
+output: 
+  html_notebook:
+    toc: false
+    toc_float: false
+    code_folding: hide
+runtime: shiny
+---
+<style type="text/css">
+.main-container {
+  max-width: 100%;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+```{r load_data_library, echo=FALSE}
+load("R_obj_updated.RData")
+# install the package if not already available
+suppressMessages(library(tidyverse))
+suppressMessages(library(data.table))
+suppressMessages(library(cowplot))
+suppressMessages(library(shiny))
+```
+```{r plot_gene, echo=FALSE}
+myGenePlot <- function(lc = lcpm, gene = "CAGL0B02475g", sample_info = sample_info) {
+  if(!(gene %in% rownames(lc))) {
+    return(ggplot() + 
+             annotate("text", x = 0.5, y = 0.5, label = "Gene ID not found in expression data") + 
+             theme_void())
+  }
+  
+  exn <- lc[gene,]
+  
+  dt <- data.table(
+    Sample = colnames(lc),
+    Timepoint = sample_info$Timepoint,
+    Replicate = sample_info$Replicate,
+    exn = as.numeric(exn)
+  )
+  
+  time_order <- c("0min", "15min", "30min", "45min", "1h", "1.5h", "2h", "3h", "4h", "6h", "8h")
+  dt$Timepoint <- factor(dt$Timepoint, levels = time_order)
+  
+  p <- ggplot(dt, aes(x = Timepoint, y = exn, color = factor(Replicate), group = Replicate)) +
+    geom_point() + 
+    geom_line() +
+    ylab("log2 count per million") + 
+    ggtitle(paste("Expression of", gene)) +
+    theme_cowplot() + 
+    theme(axis.text.x = element_text(angle = 45, size = rel(0.75), hjust = 1)) +
+    scale_color_discrete(name = "Replicate")
+  
+  p + panel_border() + background_grid()
+}
+```
+```{r shiny_app, echo=FALSE}
+# Updated search_gene function
+search_gene <- function(query) {
+  query <- toupper(query)
+  
+  # Check for CAGL0 ID directly in LCPM rownames
+  if (grepl("^CAGL0", query) && query %in% rownames(lcpm)) {
+    return(query)
+  }
+  
+  # Check for GWK60 ID and map to CAGL0 ID
+  if (grepl("^GWK60_", query)) {
+    cagl_id <- anno$GeneID[anno$GWK60_ID == query]
+    if (length(cagl_id) == 1 && cagl_id %in% rownames(lcpm)) {
+      return(cagl_id)
+    }
+  }
+  
+  # Check for gene name and map to CAGL0 ID
+  if (query %in% anno$GeneName) {
+    cagl_id <- anno$GeneID[anno$GeneName == query]
+    if (length(cagl_id) == 1 && cagl_id[1] %in% rownames(lcpm)) {
+      return(cagl_id)
+    }
+  }
+  
+  # Check for S. cerevisiae name and map to CAGL0 ID
+  if (query %in% cgToSc$scname) {
+    cagl_id <- cgToSc$cgid[cgToSc$scname == query]
+    if (length(cagl_id) == 1 && cagl_id[1] %in% rownames(lcpm)) {
+      return(cagl_id)
+    }
+  }
+  
+  # If no exact match is found, try to partially match
+  partial_matches <- c(
+    rownames(lcpm)[grepl(query, rownames(lcpm), ignore.case = TRUE)],
+    anno$GeneID[grepl(query, anno$GeneID, ignore.case = TRUE) | 
+                grepl(query, anno$GeneName, ignore.case = TRUE) | 
+                grepl(query, anno$GWK60_ID, ignore.case = TRUE)],
+    cgToSc$cgid[grepl(query, cgToSc$scname, ignore.case = TRUE)]
+  )
+  
+  partial_matches <- unique(partial_matches)
+  
+  if (length(partial_matches) == 1) {
+    return(partial_matches[1])  # Return the first partial match
+  }
+  
+  return(NULL)
+}
+library(shiny)
+library(ggplot2)
+library(cowplot)
+ui <- fillPage(
+  
+  navbarPage(
+  " ",   
+  navbarMenu("species", 
+    tabPanel("Candida glabrata", 
+  tags$head(
+    tags$style(HTML("
+      body, html {
+        height: 100%;
+        width: 100%;
+        margin: 0;
+        padding: 0;
+      }
+      #sidebar {
+        width: 300px;
+        padding: 20px;
+        background-color: #f5f5f5;
+        height: 100vh;
+        position: fixed;
+        left: 0;
+        top: 0;
+        overflow-y: auto;
+        border-right: 1px solid #ddd;
+      }
+      #mainPanel {
+        margin-left: 300px;
+        height: 100vh;
+        display: grid;
+        grid-template-rows: auto 1fr;
+        gap: 20px;
+        padding: 20px;
+        overflow-y: auto;
+      }
+      .plot-container {
+        background: white;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        padding: 15px;
+      }
+      .results-container {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 20px;
+        align-content: start;
+      }
+      .results-table {
+        background: white;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        padding: 15px;
+      }
+      .table-caption {
+        font-weight: bold;
+        margin-bottom: 10px;
+        color: #333;
+      }
+      #gene_info {
+        background: white;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        padding: 15px;
+        margin-top: 20px;
+        white-space: pre-wrap;
+      }
+      #plot_button {
+        width: 100%;
+        margin-top: 10px;
+        padding: 8px;
+        background-color: #337ab7;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+      }
+      #plot_button:hover {
+        background-color: #286090;
+      }
+      .shiny-input-container {
+        width: 100%;
+      }
+    "))
+  ),
+  
+  div(id = "sidebar",
+    h3("Gene Expression Analysis", style = "margin-top: 0;"),
+    textInput("genename", "Enter gene name or ID:", "Pho4"),
+    actionButton("plot_button", "Generate Plot"),
+    hr(),
+    verbatimTextOutput("gene_info")
+  ),
+  
+  div(id = "mainPanel",
+    div(class = "plot-container",
+      plotOutput("gene_plot")
+    ),
+    div(class = "results-container",
+      div(class = "results-table",
+        div(class = "table-caption", "C. glabrata Search Results"),
+        tableOutput("search_results_cg")
+      ),
+      div(class = "results-table",
+        div(class = "table-caption", "S. cerevisiae Search Results"),
+        tableOutput("search_results_sc")
+      )
+    )
+  )
+),
+    tabPanel("Saccharomyces cerevisiae", "place holder 1"),
+    tabPanel("Kluyveromyces lactis", "place holder 2"),
+    tabPanel("Candida albicans", "place holder 3")
+  )
+))
+server <- function(input, output, session) {
+  selected_gene <- reactiveVal()
+  
+  observeEvent(input$plot_button, {
+    gene_id <- search_gene(input$genename)
+    selected_gene(gene_id)
+  })
+  
+  # Render the plot based on the selected gene
+  output$gene_plot <- renderPlot({
+    req(selected_gene())
+    gene <- selected_gene()
+    if (!is.null(gene) && gene %in% rownames(lcpm)) {
+      myGenePlot(gene = gene, lc = lcpm, sample_info = sample_info)
+    } else {
+      ggplot() + 
+        annotate("text", x = 0.5, y = 0.5, label = "Gene not found or invalid input") + 
+        theme_void()
+    }
+  })
+  
+  # Render the gene information in the sidebar
+  output$gene_info <- renderText({
+    req(selected_gene())
+    gene <- selected_gene()
+    if (!is.null(gene)) {
+      gene_info <- anno[anno$GeneID == gene, ]
+      if (nrow(gene_info) > 0) {
+        paste("Gene ID:", gene,
+              "\nGene Name:", gene_info$GeneName,
+              "\nGWK60 ID:", gene_info$GWK60_ID,
+              "\nFound in dataset:", if(gene %in% rownames(lcpm)) "Yes" else "No")
+      } else {
+        paste("Gene ID:", gene, "\nFound in dataset:", if(gene %in% rownames(lcpm)) "Yes" else "No")
+      }
+    } else {
+      "No gene found matching the input."
+    }
+  })
+  
+  # Display search results for C. glabrata
+  output$search_results_cg <- renderTable({
+    req(input$genename)
+    query <- toupper(input$genename)
+    anno %>% 
+      filter(GeneID == query | GeneName == query | GWK60_ID == query |
+               grepl(query, GeneID, ignore.case = TRUE) | 
+               grepl(query, GeneName, ignore.case = TRUE) |
+               grepl(query, GWK60_ID, ignore.case = TRUE)) %>% 
+      select(GeneID, GeneName, GWK60_ID) %>%
+      head()
+  }, caption = "C. glabrata search results")
+  
+  # Display search results for S. cerevisiae
+  output$search_results_sc <- renderTable({
+    req(input$genename)
+    query <- toupper(input$genename)
+    cgToSc %>% 
+      filter(cgid == query | scname == query |
+               grepl(query, cgid, ignore.case = TRUE) | 
+               grepl(query, scname, ignore.case = TRUE)) %>% 
+      head()
+  }, caption = "S. cerevisiae search results")
+}
+shinyApp(ui = ui, server = server, options = list(height = 1080))
